@@ -1,0 +1,120 @@
+RANK
+SELECT 
+    d.driver_id,
+    d.full_name,
+    t.trip_id,
+    t.delay_minutes,
+
+    ROW_NUMBER() OVER (PARTITION BY d.driver_id ORDER BY t.delay_minutes DESC) AS rn,
+    RANK()       OVER (PARTITION BY d.driver_id ORDER BY t.delay_minutes DESC) AS rnk,
+    DENSE_RANK() OVER (PARTITION BY d.driver_id ORDER BY t.delay_minutes DESC) AS dense_rnk
+
+FROM TRIPS t
+JOIN DRIVERS d ON t.driver_id = d.driver_id
+ORDER BY d.driver_id, rn;
+
+✔ Shows differences between row_number, rank, dense_rank
+✔ Uses PARTITION BY (per driver)
+✔ Uses ORDER BY inside the window
+
+LAG() and LEAD()
+
+SELECT 
+    v.plate_number,
+    t.trip_id,
+    t.delay_minutes,
+    LAG(t.delay_minutes)  OVER (PARTITION BY v.vehicle_id ORDER BY t.departure_time) AS prev_delay,
+    LEAD(t.delay_minutes) OVER (PARTITION BY v.vehicle_id ORDER BY t.departure_time) AS next_delay
+FROM TRIPS t
+JOIN VEHICLES v ON t.vehicle_id = v.vehicle_id
+ORDER BY v.plate_number, t.departure_time;
+
+✔ LAG & LEAD
+✔ PARTITION BY vehicle
+✔ ORDER BY trip date
+
+Aggregates with OVER()
+
+SELECT 
+    d.driver_id,
+    d.full_name,
+    COUNT(*) OVER (PARTITION BY d.driver_id) AS trips_per_driver,
+    t.trip_id,
+    t.trip_status
+FROM TRIPS t
+JOIN DRIVERS d ON t.driver_id = d.driver_id
+ORDER BY d.driver_id;
+
+
+✔ COUNT(*) OVER()
+✔ No GROUP BY needed
+✔ Shows window aggregation across rows
+
+Running total of trips for each vehicle (cumulative sum)
+
+SELECT 
+    v.plate_number,
+    t.trip_id,
+    t.departure_time,
+    COUNT(*) OVER (
+        PARTITION BY v.vehicle_id 
+        ORDER BY t.departure_time
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS running_trip_count
+FROM TRIPS t
+JOIN VEHICLES v ON t.vehicle_id = v.vehicle_id
+ORDER BY v.plate_number, t.departure_time;
+
+✔ Running totals
+✔ ORDER BY within window
+✔ Frame clause (UNBOUNDED PRECEDING)
+
+. More advanced: Average delay comparison
+Query: Compare a trip delay vs. the average delay for the same route
+
+SELECT 
+    r.route_id,
+    r.origin_city || ' → ' || r.destination_city AS route_name,
+    t.trip_id,
+    t.delay_minutes,
+    AVG(t.delay_minutes) OVER (PARTITION BY r.route_id) AS avg_delay_on_route,
+    t.delay_minutes - AVG(t.delay_minutes) OVER (PARTITION BY r.route_id) AS diff_from_avg
+FROM TRIPS t
+JOIN ROUTES r ON t.route_id = r.route_id
+ORDER BY r.route_id, t.trip_id;
+
+
+Aggregate window
+✔ Difference from AVG
+✔ Clear BI insight
+
+Full example demonstrating all window functions in one view/table
+
+CREATE OR REPLACE VIEW trip_window_analysis AS
+SELECT 
+    t.trip_id,
+    d.full_name AS driver,
+    v.plate_number,
+    r.origin_city,
+    r.destination_city,
+    t.delay_minutes,
+
+    ROW_NUMBER() OVER (PARTITION BY d.driver_id ORDER BY t.delay_minutes DESC) AS rn,
+    RANK()       OVER (PARTITION BY d.driver_id ORDER BY t.delay_minutes DESC) AS rnk,
+    DENSE_RANK() OVER (PARTITION BY d.driver_id ORDER BY t.delay_minutes DESC) AS dense_rnk,
+
+    LAG(t.delay_minutes)  OVER (PARTITION BY v.vehicle_id ORDER BY t.departure_time) AS prev_delay,
+    LEAD(t.delay_minutes) OVER (PARTITION BY v.vehicle_id ORDER BY t.departure_time) AS next_delay,
+
+    AVG(t.delay_minutes) OVER (PARTITION BY r.route_id) AS avg_delay_route,
+    COUNT(*) OVER (PARTITION BY d.driver_id) AS total_driver_trips
+
+FROM TRIPS t
+JOIN VEHICLES v ON t.vehicle_id = v.vehicle_id
+JOIN DRIVERS d ON t.driver_id = d.driver_id
+JOIN ROUTES r  ON t.route_id  = r.route_id;
+
+Then test:
+
+SELECT * FROM trip_window_analysis
+ORDER BY driver, rn;
