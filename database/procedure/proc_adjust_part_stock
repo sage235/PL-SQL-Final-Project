@@ -1,1 +1,51 @@
+-- proc_adjust_part_stock: adjust stock safely (IN part_id, IN qty_change, IN OUT current_stock)
+CREATE OR REPLACE PROCEDURE proc_adjust_part_stock(
+  p_part_id       IN     NUMBER,
+  p_qty_change    IN     NUMBER,
+  p_current_stock IN OUT NUMBER
+) IS
+  v_stock NUMBER;
+  v_err_code NUMBER;
+  v_err_msg  VARCHAR2(4000);
+BEGIN
+  IF p_part_id IS NULL THEN
+    RAISE_APPLICATION_ERROR(-20011,'part_id is required');
+  END IF;
+
+  BEGIN
+    SELECT stock_qty INTO v_stock FROM PARTS WHERE part_id = p_part_id FOR UPDATE;
+  EXCEPTION
+    WHEN NO_DATA_FOUND THEN
+      v_err_code := SQLCODE;
+      v_err_msg  := SQLERRM;
+      INSERT INTO ERROR_LOG(object_name, action, err_code, err_msg, details)
+      VALUES ('proc_adjust_part_stock','select','NO_DATA_FOUND','Part not found','part_id='||p_part_id);
+      COMMIT;
+      RAISE_APPLICATION_ERROR(-20012,'Part not found: '||p_part_id);
+  END;
+
+  v_stock := v_stock + NVL(p_qty_change,0);
+
+  IF v_stock < 0 THEN
+    INSERT INTO ERROR_LOG(object_name, action, err_code, err_msg, details)
+    VALUES ('proc_adjust_part_stock','validate','STOCK_UNDERFLOW','stock would become negative','part_id='||p_part_id||' change='||p_qty_change);
+    COMMIT;
+    RAISE_APPLICATION_ERROR(-20013,'Insufficient stock for part '||p_part_id||' (change='||p_qty_change||')');
+  END IF;
+
+  UPDATE PARTS SET stock_qty = v_stock WHERE part_id = p_part_id;
+  p_current_stock := v_stock;
+
+  COMMIT;
+EXCEPTION
+  WHEN OTHERS THEN
+    v_err_code := SQLCODE;
+    v_err_msg  := SQLERRM;
+    INSERT INTO ERROR_LOG(object_name, action, err_code, err_msg, details)
+    VALUES ('proc_adjust_part_stock','update',v_err_code, v_err_msg, 'part_id='||NVL(TO_CHAR(p_part_id),'NULL'));
+    COMMIT;
+    ROLLBACK;
+    RAISE;
+END proc_adjust_part_stock;
+/
 
