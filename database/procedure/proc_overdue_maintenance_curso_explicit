@@ -1,1 +1,95 @@
+-- 1) Autonomous logger (safe: commits without affecting open cursors)
+CREATE OR REPLACE PROCEDURE log_error_autonomous(
+  p_object_name IN VARCHAR2,
+  p_action      IN VARCHAR2,
+  p_err_code    IN NUMBER,
+  p_err_msg     IN VARCHAR2,
+  p_details     IN VARCHAR2
+) IS
+  PRAGMA AUTONOMOUS_TRANSACTION;
+BEGIN
+  INSERT INTO ERROR_LOG(object_name, action, err_code, err_msg, details)
+  VALUES (p_object_name, p_action, p_err_code, p_err_msg, p_details);
+  COMMIT;
+EXCEPTION WHEN OTHERS THEN
+  -- swallow to avoid cascading failure; optionally write to DBMS_OUTPUT
+  NULL;
+END log_error_autonomous;
+/
+
+-- 2) Autonomous alert inserter (optional but useful)
+CREATE OR REPLACE PROCEDURE insert_alert_autonomous(
+  p_alert_type IN VARCHAR2,
+  p_entity_id  IN NUMBER,
+  p_message    IN VARCHAR2
+) IS
+  PRAGMA AUTONOMOUS_TRANSACTION;
+BEGIN
+  INSERT INTO ALERTS(alert_type, entity_id, message, created_at)
+  VALUES (p_alert_type, p_entity_id, p_message, SYSTIMESTAMP);
+  COMMIT;
+EXCEPTION WHEN OTHERS THEN
+  NULL;
+END insert_alert_autonomous;
+/
+
+-- 3) Fixed proc_process_overdue_maintenance: no COMMIT inside fetch loop;
+--    use autonomous helpers for logging & alerts; commit at end once.
+CREATE OR REPLACE PROCEDURE proc_process_overdue_maintenance IS
+  CURSOR c_overdue IS
+    SELECT maintenance_id, vehicle_id, scheduled_date
+    FROM MAINTENANCE_RECORDS
+    WHERE status = 'PENDING' AND scheduled_date < SYSTIMESTAMP
+    FOR UPDATE SKIP LOCKED;
+
+  v_rec c_overdue%ROWTYPE;
+  v_processed NUMBER := 0;
+  v_message VARCHAR2(4000);
+  v_alert_type VARCHAR2(100) := 'MAINTENANCE_OVERDUE';
+BEGIN
+  OPEN c_overdue;
+  LOOP
+    FETCH c_overdue INTO v_rec;
+    EXIT WHEN c_overdue%NOTFOUND;
+
+    BEGIN
+      v_message := 'Maintenance overdue for vehicle ' || NVL(TO_CHAR(v_rec.vehicle_id), '?');
+
+      -- update maintenance row (locked by cursor)
+      UPDATE MAINTENANCE_RECORDS
+      SET status = 'OVERDUE', updated_at = SYSTIMESTAMP
+      WHERE maintenance_id = v_rec.maintenance_id;
+
+      -- insert alert using autonomous procedure so it commits independently
+      insert_alert_autonomous(v_alert_type, v_rec.maintenance_id, v_message);
+
+      v_processed := v_processed + 1;
+
+      -- DO NOT commit here (commit at end of the whole job)
+    EXCEPTION
+      WHEN OTHERS THEN
+        -- log with autonomous logger so logging itself doesn't affect the cursor
+        log_error_autonomous('proc_process_overdue_maintenance','process', SQLCODE, SQLERRM,
+                            'maintenance_id=' || NVL(TO_CHAR(v_rec.maintenance_id),'NULL'));
+        -- continue processing remaining rows
+    END;
+  END LOOP;
+
+  CLOSE c_overdue;
+
+  -- now commit all updates performed during the cursor run
+  COMMIT;
+
+  DBMS_OUTPUT.PUT_LINE('Overdue maintenance processed: ' || v_processed);
+
+EXCEPTION
+  WHEN OTHERS THEN
+    IF c_overdue%ISOPEN THEN
+      CLOSE c_overdue;
+    END IF;
+    -- log the outer error (autonomously)
+    log_error_autonomous('proc_process_overdue_maintenance','outer', SQLCODE, SQLERRM, NULL);
+    RAISE;
+END proc_process_overdue_maintenance;
+/
 
