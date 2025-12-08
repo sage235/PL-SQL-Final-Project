@@ -1,1 +1,54 @@
+CREATE OR REPLACE FUNCTION fn_get_driver_id_by_license(p_license IN VARCHAR2) RETURN NUMBER IS
+  v_driver_id NUMBER;
+  v_err_code  NUMBER;
+  v_err_msg   VARCHAR2(4000);
+  v_col_exists NUMBER;
+  v_sql       VARCHAR2(1000);
+BEGIN
+  IF p_license IS NULL THEN
+    RETURN NULL;
+  END IF;
+
+  -- check whether the column LICENSE_NUMBER exists in DRIVERS (names are uppercase in data dictionary)
+  SELECT COUNT(*) INTO v_col_exists
+  FROM user_tab_columns
+  WHERE table_name = 'DRIVERS' AND column_name = 'LICENSE_NUMBER';
+
+  IF v_col_exists = 0 THEN
+    -- column not present in this schema -> cannot lookup, return NULL
+    RETURN NULL;
+  END IF;
+
+  -- column exists -> perform lookup via dynamic SQL (safe and avoids compile-time binding issues)
+  v_sql := 'SELECT driver_id FROM DRIVERS WHERE LICENSE_NUMBER = :1';
+
+  BEGIN
+    EXECUTE IMMEDIATE v_sql INTO v_driver_id USING p_license;
+    RETURN v_driver_id;
+  EXCEPTION
+    WHEN NO_DATA_FOUND THEN
+      RETURN NULL;
+    WHEN OTHERS THEN
+      v_err_code := SQLCODE;
+      v_err_msg  := SQLERRM;
+      BEGIN
+        INSERT INTO ERROR_LOG(object_name, action, err_code, err_msg, details)
+        VALUES('fn_get_driver_id_by_license','select', v_err_code, v_err_msg, 'license='||NVL(p_license,'NULL'));
+        COMMIT;
+      EXCEPTION WHEN OTHERS THEN NULL; END;
+      RETURN NULL;
+  END;
+
+EXCEPTION
+  WHEN OTHERS THEN
+    v_err_code := SQLCODE;
+    v_err_msg  := SQLERRM;
+    BEGIN
+      INSERT INTO ERROR_LOG(object_name, action, err_code, err_msg, details)
+      VALUES('fn_get_driver_id_by_license','outer', v_err_code, v_err_msg, 'license='||NVL(p_license,'NULL'));
+      COMMIT;
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+    RETURN NULL;
+END fn_get_driver_id_by_license;
+/
 
