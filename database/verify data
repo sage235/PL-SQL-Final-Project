@@ -1,0 +1,173 @@
+# verify_data_integrity.md
+
+The verification covers:
+
+- Row counts  
+- Foreign key integrity (orphan detection)  
+- Constraint validation (NOT NULL, UNIQUE, CHECK)  
+- Business-level integrity (joins and aggregations)  
+- Final PL/SQL summary block for reporting
+
+
+
+# 1. BASIC ROW COUNTS  
+Ensures tables contain expected data volume.
+
+```sql
+SELECT 'VEHICLES' AS table_name, COUNT(*) FROM VEHICLES UNION ALL
+SELECT 'DRIVERS', COUNT(*) FROM DRIVERS UNION ALL
+SELECT 'ROUTES', COUNT(*) FROM ROUTES UNION ALL
+SELECT 'TRIPS', COUNT(*) FROM TRIPS UNION ALL
+SELECT 'PARTS', COUNT(*) FROM PARTS UNION ALL
+SELECT 'MAINTENANCE', COUNT(*) FROM MAINTENANCE_RECORDS UNION ALL
+SELECT 'MAINT_PARTS', COUNT(*) FROM MAINTENANCE_PARTS UNION ALL
+SELECT 'INCIDENTS', COUNT(*) FROM INCIDENTS UNION ALL
+SELECT 'USERS', COUNT(*) FROM USERS UNION ALL
+SELECT 'ALERTS', COUNT(*) FROM ALERTS UNION ALL
+SELECT 'RISK_SCORES', COUNT(*) FROM RISK_SCORES UNION ALL
+SELECT 'AUDIT_LOG', COUNT(*) FROM AUDIT_LOG;
+```
+
+---
+
+# 2. CONSTRAINT VALIDATION  
+Ensures all constraints are active and correctly enforced.
+
+### 2.1 Disabled constraints (should be NONE)
+```sql
+SELECT constraint_name, constraint_type, table_name, status
+FROM user_constraints
+WHERE status <> 'ENABLED';
+```
+
+### 2.2 Not-null validation  
+```sql
+SELECT COUNT(*) FROM TRIPS WHERE vehicle_id IS NULL OR driver_id IS NULL OR route_id IS NULL;
+SELECT COUNT(*) FROM MAINTENANCE_RECORDS WHERE vehicle_id IS NULL;
+SELECT COUNT(*) FROM INCIDENTS WHERE trip_id IS NULL;
+```
+
+### 2.3 Unique validation  
+```sql
+SELECT plate_number, COUNT(*) FROM VEHICLES GROUP BY plate_number HAVING COUNT(*) > 1;
+SELECT license_number, COUNT(*) FROM DRIVERS GROUP BY license_number HAVING COUNT(*) > 1;
+```
+
+No rows returned = VALID.
+
+---
+
+# 3. FOREIGN KEY INTEGRITY CHECKS  
+Detects orphan rows (rows pointing to missing parents).  
+**All counts must be 0.**
+
+### 3.1 Trips → Vehicles / Drivers / Routes  
+```sql
+SELECT COUNT(*) FROM TRIPS t LEFT JOIN VEHICLES v ON t.vehicle_id = v.vehicle_id WHERE v.vehicle_id IS NULL;
+SELECT COUNT(*) FROM TRIPS t LEFT JOIN DRIVERS d ON t.driver_id = d.driver_id WHERE d.driver_id IS NULL;
+SELECT COUNT(*) FROM TRIPS t LEFT JOIN ROUTES r ON t.route_id = r.route_id WHERE r.route_id IS NULL;
+```
+
+### 3.2 Maintenance → Vehicles  
+```sql
+SELECT COUNT(*) FROM MAINTENANCE_RECORDS m LEFT JOIN VEHICLES v ON m.vehicle_id = v.vehicle_id WHERE v.vehicle_id IS NULL;
+```
+
+### 3.3 Maintenance_parts → Maintenance_records & Parts  
+```sql
+SELECT COUNT(*) FROM MAINTENANCE_PARTS mp LEFT JOIN MAINTENANCE_RECORDS m ON mp.maintenance_id = m.maintenance_id WHERE m.maintenance_id IS NULL;
+SELECT COUNT(*) FROM MAINTENANCE_PARTS mp LEFT JOIN PARTS p ON mp.part_id = p.part_id WHERE p.part_id IS NULL;
+```
+
+### 3.4 Incidents → Trips  
+```sql
+SELECT COUNT(*) FROM INCIDENTS i LEFT JOIN TRIPS t ON i.trip_id = t.trip_id WHERE t.trip_id IS NULL;
+```
+
+---
+
+# 4. BUSINESS-LEVEL INTEGRITY  
+Ensures real-world correctness & meaningful data distribution.
+
+### 4.1 Trips per vehicle  
+```sql
+SELECT v.plate_number, COUNT(t.trip_id) AS trip_count
+FROM VEHICLES v LEFT JOIN TRIPS t ON v.vehicle_id = t.vehicle_id
+GROUP BY v.plate_number
+ORDER BY trip_count DESC;
+```
+
+### 4.2 Maintenance cost per vehicle  
+```sql
+SELECT v.plate_number, SUM(m.cost_amount) AS total_cost
+FROM VEHICLES v LEFT JOIN MAINTENANCE_RECORDS m ON v.vehicle_id = m.vehicle_id
+GROUP BY v.plate_number
+ORDER BY total_cost DESC;
+```
+
+### 4.3 Incident per severity  
+```sql
+SELECT severity, COUNT(*) FROM INCIDENTS GROUP BY severity ORDER BY COUNT(*) DESC;
+```
+
+### 4.4 Delays by route  
+```sql
+SELECT r.origin_city, r.destination_city, AVG(t.delay_minutes) AS avg_delay
+FROM TRIPS t JOIN ROUTES r ON t.route_id = r.route_id
+GROUP BY r.origin_city, r.destination_city
+ORDER BY avg_delay DESC NULLS LAST;
+```
+
+---
+
+# 5. PL/SQL INTEGRITY SUMMARY  
+Run this with **F5 (Run Script)**.
+
+```sql
+SET SERVEROUTPUT ON SIZE 1000000;
+DECLARE
+  c_trip_no_vehicle NUMBER;
+  c_trip_no_driver  NUMBER;
+  c_trip_no_route   NUMBER;
+  c_maint_no_vehicle NUMBER;
+  c_mp_no_maint NUMBER;
+  c_mp_no_part NUMBER;
+  c_inc_no_trip NUMBER;
+BEGIN
+  DBMS_OUTPUT.PUT_LINE('==== DATA INTEGRITY SUMMARY ====');
+
+  -- Orphan checks
+  SELECT COUNT(*) INTO c_trip_no_vehicle FROM TRIPS t LEFT JOIN VEHICLES v ON t.vehicle_id=v.vehicle_id WHERE v.vehicle_id IS NULL;
+  SELECT COUNT(*) INTO c_trip_no_driver  FROM TRIPS t LEFT JOIN DRIVERS d ON t.driver_id=d.driver_id WHERE d.driver_id IS NULL;
+  SELECT COUNT(*) INTO c_trip_no_route   FROM TRIPS t LEFT JOIN ROUTES r ON t.route_id=r.route_id WHERE r.route_id IS NULL;
+
+  SELECT COUNT(*) INTO c_maint_no_vehicle FROM MAINTENANCE_RECORDS m LEFT JOIN VEHICLES v ON m.vehicle_id=v.vehicle_id WHERE v.vehicle_id IS NULL;
+  SELECT COUNT(*) INTO c_mp_no_maint FROM MAINTENANCE_PARTS mp LEFT JOIN MAINTENANCE_RECORDS m ON mp.maintenance_id=m.maintenance_id WHERE m.maintenance_id IS NULL;
+  SELECT COUNT(*) INTO c_mp_no_part  FROM MAINTENANCE_PARTS mp LEFT JOIN PARTS p ON mp.part_id=p.part_id WHERE p.part_id IS NULL;
+
+  SELECT COUNT(*) INTO c_inc_no_trip FROM INCIDENTS i LEFT JOIN TRIPS t ON i.trip_id=t.trip_id WHERE t.trip_id IS NULL;
+
+  DBMS_OUTPUT.PUT_LINE('Trips missing Vehicles  : ' || c_trip_no_vehicle);
+  DBMS_OUTPUT.PUT_LINE('Trips missing Drivers   : ' || c_trip_no_driver);
+  DBMS_OUTPUT.PUT_LINE('Trips missing Routes    : ' || c_trip_no_route);
+  DBMS_OUTPUT.PUT_LINE('Maintenance missing Veh : ' || c_maint_no_vehicle);
+  DBMS_OUTPUT.PUT_LINE('MaintParts missing Maint: ' || c_mp_no_maint);
+  DBMS_OUTPUT.PUT_LINE('MaintParts missing Part : ' || c_mp_no_part);
+  DBMS_OUTPUT.PUT_LINE('Incidents missing Trip  : ' || c_inc_no_trip);
+
+  IF c_trip_no_vehicle = 0
+     AND c_trip_no_driver = 0
+     AND c_trip_no_route = 0
+     AND c_maint_no_vehicle = 0
+     AND c_mp_no_maint = 0
+     AND c_mp_no_part = 0
+     AND c_inc_no_trip = 0 THEN
+    DBMS_OUTPUT.PUT_LINE('FK Integrity: PASSED');
+  ELSE
+    DBMS_OUTPUT.PUT_LINE('FK Integrity: FAILED — Investigate values above.');
+  END IF;
+
+  DBMS_OUTPUT.PUT_LINE('==== VERIFICATION COMPLETE ====');
+END;
+/
+```
