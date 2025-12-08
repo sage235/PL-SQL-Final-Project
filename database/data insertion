@@ -403,24 +403,3 @@ BEGIN
 END;
 /
 ```
-
----
-
-## Verification
-After running all scripts, run the verification script (`verify_data_integrity.sql`) or the quick SQL checks in `verify_data_integrity.sql` to confirm FK integrity, counts, and constraints.
-
----
-
-## Adjustments & Troubleshooting
-- If you experience duplicate PK errors on composite keys (MAINTENANCE_PARTS / RISK_SCORES), rerun the safe insertion blocks (they use `NOT EXISTS` checks).
-- If parent tables are empty, some inserts will be skipped; ensure Vehicles/Drivers/Routes/Parts are populated first.
-- Reduce loop counts if the database session times out.
-
----
-
-## Exporting Results
-In SQL Developer use **F5** to run each block and copy the Script Output / DBMS_OUTPUT. Save outputs and include them in your GitHub `/database/docs/evidence/`.
-
----
-
-If you want, I can now write this file to the workspace and provide a download link. Would you like me to save `populate_data.md` to the workspace?
