@@ -1,0 +1,66 @@
+-- proc_bulk_insert_vehicles_from_temp_dynamic.sql
+CREATE OR REPLACE PROCEDURE proc_bulk_insert_vehicles_from_temp(p_batch_size IN PLS_INTEGER DEFAULT 1000) IS
+  TYPE t_plate_tab IS TABLE OF VARCHAR2(50);
+  l_plates t_plate_tab;
+  l_total NUMBER := 0;
+
+  rc SYS_REFCURSOR;
+  l_sql VARCHAR2(1000);
+  v_cnt NUMBER;
+
+  v_err_code NUMBER;
+  v_err_msg  VARCHAR2(4000);
+BEGIN
+  -- check that staging table exists in this schema
+  SELECT COUNT(*) INTO v_cnt FROM user_tables WHERE table_name = 'VEHICLES_TEMP';
+
+  IF v_cnt = 0 THEN
+    RAISE_APPLICATION_ERROR(-20050, 'Staging table VEHICLES_TEMP does not exist. Create it or populate it first.');
+  END IF;
+
+  l_sql := 'SELECT plate_number FROM VEHICLES_TEMP';
+
+  OPEN rc FOR l_sql;
+
+  LOOP
+    FETCH rc BULK COLLECT INTO l_plates LIMIT p_batch_size;
+
+    EXIT WHEN l_plates.COUNT = 0;
+
+    -- FORALL uses collection elements as binds; safe and fast
+    FORALL i IN 1 .. l_plates.COUNT
+      INSERT INTO VEHICLES(plate_number) VALUES (l_plates(i));
+
+    l_total := l_total + l_plates.COUNT;
+
+    -- commit per batch (adjust to your policy)
+    COMMIT;
+  END LOOP;
+
+  CLOSE rc;
+
+  DBMS_OUTPUT.PUT_LINE('Inserted vehicles: ' || l_total);
+
+EXCEPTION
+  WHEN OTHERS THEN
+    v_err_code := SQLCODE;
+    v_err_msg  := SQLERRM;
+    -- ensure cursor closed if still open
+    BEGIN
+      IF rc%ISOPEN THEN
+        CLOSE rc;
+      END IF;
+    EXCEPTION WHEN OTHERS THEN NULL;
+    END;
+
+    -- log the error (requires ERROR_LOG table)
+    BEGIN
+      INSERT INTO ERROR_LOG(object_name, action, err_code, err_msg, details)
+      VALUES('proc_bulk_insert_vehicles_from_temp','bulk_insert', v_err_code, v_err_msg, 'processed='||l_total);
+      COMMIT;
+    EXCEPTION WHEN OTHERS THEN NULL;
+    END;
+
+    RAISE;
+END proc_bulk_insert_vehicles_from_temp;
+/
