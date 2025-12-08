@@ -1,0 +1,56 @@
+⭐ Overview
+
+This document describes the Exception Handling Strategy implemented in the FLEET_OPS_PKG PL/SQL package for the Transport & Fleet Management System.
+
+Exception handling ensures:
+
+Data integrity
+
+System stability
+
+Clear error reporting
+
+Safe recovery from failures
+
+The approach includes predefined exceptions, custom exceptions, centralized logging, and recovery mechanisms.
+
+1. Predefined Exceptions
+
+Examples:
+
+EXCEPTION WHEN NO_DATA_FOUND THEN
+    log_error_autonomous('fleet_ops_pkg.adjust_part_stock','select', SQLCODE, SQLERRM, 'part_id='||p_part_id);
+    RAISE_APPLICATION_ERROR(-20012, 'Part not found: ' || p_part_id);
+END;
+
+EXCEPTION WHEN DUP_VAL_ON_INDEX THEN
+    log_error_autonomous('fleet_ops_pkg.add_user','insert', SQLCODE, SQLERRM, 'username='||v_username);
+    RAISE_APPLICATION_ERROR(-20002,'Username already exists: '||v_username);
+END;
+
+2. Custom Exceptions
+IF p_username IS NULL THEN
+  RAISE_APPLICATION_ERROR(-20001,'Username is required');
+END IF;
+
+IF v_stock < 0 THEN
+  RAISE_APPLICATION_ERROR(-20013,'Insufficient stock for part '||p_part_id);
+END IF;
+
+3. Centralized Error Logging
+PROCEDURE log_error_autonomous(...) IS
+  PRAGMA AUTONOMOUS_TRANSACTION;
+BEGIN
+  INSERT INTO ERROR_LOG(...);
+  COMMIT;
+END;
+
+4. Recovery Mechanisms
+EXCEPTION WHEN OTHERS THEN
+  log_error_autonomous(...);
+  RAISE;
+END;
+
+✔ Conclusion
+
+This implements all Exception Handling requirements for Phase VI
