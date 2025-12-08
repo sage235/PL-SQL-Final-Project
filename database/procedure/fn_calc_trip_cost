@@ -1,1 +1,45 @@
+-- fn_calc_trip_cost.sql
+CREATE OR REPLACE FUNCTION fn_calc_trip_cost(
+  p_trip_id      IN NUMBER,
+  p_cost_per_km  IN NUMBER DEFAULT 1.5,  -- default cost per km
+  p_load_factor  IN NUMBER DEFAULT 1.0   -- multiplier for load/demand
+) RETURN NUMBER IS
+  v_distance NUMBER;
+  v_base_cost NUMBER;
+  v_total_cost NUMBER;
+  v_err_code NUMBER;
+  v_err_msg  VARCHAR2(4000);
+BEGIN
+  IF p_trip_id IS NULL THEN
+    RAISE_APPLICATION_ERROR(-21001,'p_trip_id is required');
+  END IF;
+
+  -- get route distance for the trip
+  SELECT r.distance_km
+  INTO v_distance
+  FROM TRIPS t
+  JOIN ROUTES r ON t.route_id = r.route_id
+  WHERE t.trip_id = p_trip_id;
+
+  -- simple cost formula: (distance * cost_per_km * load_factor) + handling_fee
+  v_base_cost := NVL(v_distance,0) * NVL(p_cost_per_km,1.5) * NVL(p_load_factor,1.0);
+  v_total_cost := ROUND(v_base_cost + 20, 2); -- +20 currency units handling
+
+  RETURN v_total_cost;
+
+EXCEPTION
+  WHEN NO_DATA_FOUND THEN
+    RETURN NULL; -- trip or route not found -> return NULL (caller should check)
+  WHEN OTHERS THEN
+    v_err_code := SQLCODE;
+    v_err_msg  := SQLERRM;
+    -- Log and return NULL to indicate failure
+    BEGIN
+      INSERT INTO ERROR_LOG(object_name, action, err_code, err_msg, details)
+      VALUES('fn_calc_trip_cost','select', v_err_code, v_err_msg, 'trip_id='||NVL(TO_CHAR(p_trip_id),'NULL'));
+      COMMIT;
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+    RETURN NULL;
+END fn_calc_trip_cost;
+/
 
