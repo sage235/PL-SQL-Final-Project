@@ -1,1 +1,56 @@
 
+-- proc_add_user: insert user and return new id
+CREATE OR REPLACE PROCEDURE proc_add_user(
+  p_username     IN  VARCHAR2,
+  p_full_name    IN  VARCHAR2,
+  p_user_role    IN  VARCHAR2,
+  p_email        IN  VARCHAR2,
+  p_new_user_id  OUT NUMBER
+) IS
+  v_username  VARCHAR2(50);
+  v_err_code  NUMBER;
+  v_err_msg   VARCHAR2(4000);
+BEGIN
+  IF p_username IS NULL OR TRIM(p_username) = '' THEN
+    RAISE_APPLICATION_ERROR(-20001, 'Username is required');
+  END IF;
+
+  v_username := UPPER(TRIM(p_username));
+
+  BEGIN
+    EXECUTE IMMEDIATE
+      'INSERT INTO USERS (username, full_name, role, email, created_at) VALUES (:1, :2, :3, :4, SYSTIMESTAMP)'
+    USING v_username, p_full_name, p_user_role, p_email;
+
+    COMMIT;
+
+    SELECT user_id INTO p_new_user_id FROM USERS WHERE username = v_username;
+
+  EXCEPTION
+    WHEN DUP_VAL_ON_INDEX THEN
+      v_err_code := SQLCODE;
+      v_err_msg  := SQLERRM;
+      INSERT INTO ERROR_LOG(object_name, action, err_code, err_msg, details)
+      VALUES ('proc_add_user','insert',v_err_code, v_err_msg, 'username=' || v_username);
+      COMMIT;
+      RAISE_APPLICATION_ERROR(-20002,'Username already exists: '||v_username);
+
+    WHEN OTHERS THEN
+      v_err_code := SQLCODE;
+      v_err_msg  := SQLERRM;
+      INSERT INTO ERROR_LOG(object_name, action, err_code, err_msg, details)
+      VALUES ('proc_add_user','insert',v_err_code, v_err_msg, 'username=' || NVL(v_username,'NULL'));
+      COMMIT;
+      RAISE;
+  END;
+
+EXCEPTION
+  WHEN OTHERS THEN
+    v_err_code := SQLCODE;
+    v_err_msg  := SQLERRM;
+    INSERT INTO ERROR_LOG(object_name, action, err_code, err_msg, details)
+    VALUES ('proc_add_user','outer',v_err_code, v_err_msg, 'username=' || NVL(p_username,'NULL'));
+    COMMIT;
+    RAISE;
+END proc_add_user;
+/
