@@ -1,0 +1,439 @@
+# populate_data.md
+## Population Script Documentation — Fleet & Maintenance System
+
+This document describes the data population scripts used for **Phase V**.  
+Run the scripts in the order shown **as the schema owner** (`mon_27232_lesage`) inside SQL Developer or SQL*Plus. Use **F5 (Run Script)** in SQL Developer so you see `DBMS_OUTPUT` messages.
+
+> **Important**
+> - All primary keys are auto-generated with `GENERATED ALWAYS AS IDENTITY`. **Do not** insert values into ID columns.
+> - If your environment has resource limits, reduce loop counts (suggested: Trips → 300, Drivers → 150, Vehicles → 100).
+> - Run the `create_schema.sql` first to create tables and constraints.
+
+---
+
+## Run order
+1. Vehicles
+2. Drivers
+3. Routes
+4. Parts
+5. Trips
+6. Maintenance records
+7. Maintenance parts
+8. Incidents
+9. Users
+10. Alerts
+11. Risk scores
+12. Audit log
+13. Verification queries (see `verify_data_integrity.sql`)
+
+---
+
+## 1. Vehicles (200 rows)
+
+```sql
+-- Vehicles (200)
+BEGIN
+  FOR i IN 1..200 LOOP
+    INSERT INTO VEHICLES (plate_number, brand, model, capacity_tons, status)
+    VALUES (
+      'RAD-' || (1000+i) || CHR(65+MOD(i,26)),
+      CASE MOD(i,10)
+        WHEN 0 THEN 'Toyota' WHEN 1 THEN 'Isuzu' WHEN 2 THEN 'Scania'
+        WHEN 3 THEN 'Volvo' WHEN 4 THEN 'Mercedes' WHEN 5 THEN 'Hino'
+        WHEN 6 THEN 'Mitsubishi' WHEN 7 THEN 'MAN' WHEN 8 THEN 'FAW'
+        ELSE 'Dongfeng'
+      END,
+      'Model-' || (2010 + MOD(i,15)),
+      ROUND(DBMS_RANDOM.VALUE(1,30),2),
+      CASE WHEN MOD(i,37)=0 THEN 'OUT_OF_SERVICE'
+           WHEN MOD(i,20)=0 THEN 'MAINTENANCE'
+           ELSE 'ACTIVE'
+      END
+    );
+  END LOOP;
+  COMMIT;
+  DBMS_OUTPUT.PUT_LINE('Vehicles inserted: 200');
+END;
+/
+```
+
+---
+
+## 2. Drivers (300 rows)
+
+```sql
+BEGIN
+  FOR i IN 1..300 LOOP
+    INSERT INTO DRIVERS (full_name, license_number, experience_yrs, status)
+    VALUES (
+      'Driver '||i,
+      'LIC-'||(10000+i),
+      TRUNC(DBMS_RANDOM.VALUE(0,30)),
+      CASE WHEN MOD(i,40)=0 THEN 'SUSPENDED' ELSE 'ACTIVE' END
+    );
+  END LOOP;
+  COMMIT;
+  DBMS_OUTPUT.PUT_LINE('Drivers inserted: 300');
+END;
+/
+```
+
+---
+
+## 3. Routes (120 rows)
+
+```sql
+DECLARE
+  cities SYS.ODCIVARCHAR2LIST := SYS.ODCIVARCHAR2LIST(
+    'Kigali','Nairobi','Kampala','Bujumbura','Dar es Salaam','Mombasa',
+    'Addis Ababa','Khartoum','Lagos','Accra','Niamey','Kigoma'
+  );
+BEGIN
+  FOR i IN 1..120 LOOP
+    INSERT INTO ROUTES (origin_city, destination_city, distance_km, base_risk)
+    VALUES (
+      cities(1 + MOD(i, cities.COUNT)),
+      cities(1 + MOD(i+3, cities.COUNT)),
+      ROUND(DBMS_RANDOM.VALUE(50,1500),2),
+      CASE WHEN DBMS_RANDOM.VALUE(0,1) < 0.1 THEN 'HIGH'
+           WHEN DBMS_RANDOM.VALUE(0,1) < 0.4 THEN 'MEDIUM'
+           ELSE 'LOW'
+      END
+    );
+  END LOOP;
+  COMMIT;
+  DBMS_OUTPUT.PUT_LINE('Routes inserted: 120');
+END;
+/
+```
+
+---
+
+## 4. Parts (200 rows)
+
+```sql
+BEGIN
+  FOR i IN 1..200 LOOP
+    INSERT INTO PARTS (part_name, unit_price, stock_qty)
+    VALUES (
+      'Part-'||LPAD(i,4,'0'),
+      ROUND(DBMS_RANDOM.VALUE(5,500),2),
+      TRUNC(DBMS_RANDOM.VALUE(0,300))
+    );
+  END LOOP;
+  COMMIT;
+  DBMS_OUTPUT.PUT_LINE('Parts inserted: 200');
+END;
+/
+```
+
+---
+
+## 5. Trips (1000 rows)
+
+```sql
+DECLARE
+  v_vid NUMBER;
+  v_did NUMBER;
+  v_rid NUMBER;
+  v_depart TIMESTAMP;
+  v_arrival TIMESTAMP;
+  cnt_vehicles NUMBER;
+BEGIN
+  SELECT COUNT(*) INTO cnt_vehicles FROM VEHICLES;
+  IF cnt_vehicles = 0 THEN
+    DBMS_OUTPUT.PUT_LINE('No vehicles found - aborting trips insertion');
+    RETURN;
+  END IF;
+
+  FOR i IN 1..1000 LOOP
+    BEGIN
+      SELECT vehicle_id INTO v_vid FROM (SELECT vehicle_id FROM VEHICLES ORDER BY DBMS_RANDOM.VALUE) WHERE ROWNUM=1;
+      SELECT driver_id  INTO v_did FROM (SELECT driver_id  FROM DRIVERS  ORDER BY DBMS_RANDOM.VALUE) WHERE ROWNUM=1;
+      SELECT route_id   INTO v_rid FROM (SELECT route_id   FROM ROUTES   ORDER BY DBMS_RANDOM.VALUE) WHERE ROWNUM=1;
+    EXCEPTION WHEN NO_DATA_FOUND THEN
+      CONTINUE;
+    END;
+
+    v_depart  := SYSTIMESTAMP - NUMTODSINTERVAL(TRUNC(DBMS_RANDOM.VALUE(0,365)),'DAY');
+    v_arrival := v_depart + NUMTODSINTERVAL(TRUNC(DBMS_RANDOM.VALUE(3600,86400)),'SECOND');
+
+    INSERT INTO TRIPS (
+      vehicle_id, driver_id, route_id, departure_time, arrival_time,
+      planned_arrival, trip_status, delay_minutes
+    )
+    VALUES (
+      v_vid, v_did, v_rid,
+      v_depart, v_arrival,
+      v_arrival + NUMTODSINTERVAL(TRUNC(DBMS_RANDOM.VALUE(-3600,3600)),'SECOND'),
+      CASE WHEN MOD(i,5)=0 THEN 'COMPLETED'
+           WHEN MOD(i,7)=0 THEN 'CANCELLED'
+           WHEN MOD(i,3)=0 THEN 'IN_PROGRESS'
+           ELSE 'PLANNED'
+      END,
+      TRUNC(DBMS_RANDOM.VALUE(0,240))
+    );
+  END LOOP;
+
+  COMMIT;
+  DBMS_OUTPUT.PUT_LINE('Trips inserted: ' || (SELECT COUNT(*) FROM TRIPS));
+END;
+/
+```
+
+---
+
+## 6. Maintenance Records (300 rows)
+
+```sql
+DECLARE v_vid NUMBER;
+BEGIN
+  FOR i IN 1..300 LOOP
+    SELECT vehicle_id INTO v_vid FROM (SELECT vehicle_id FROM VEHICLES ORDER BY DBMS_RANDOM.VALUE) WHERE ROWNUM=1;
+
+    INSERT INTO MAINTENANCE_RECORDS (vehicle_id, maintenance_date, maintenance_type, cost_amount, technician_id, next_due_date, notes)
+    VALUES (
+      v_vid,
+      SYSDATE - TRUNC(DBMS_RANDOM.VALUE(0,365)),
+      CASE WHEN MOD(i,10)=0 THEN 'EMERGENCY'
+           WHEN MOD(i,3)=0 THEN 'CORRECTIVE'
+           ELSE 'SCHEDULED'
+      END,
+      ROUND(DBMS_RANDOM.VALUE(50,5000),2),
+      TRUNC(DBMS_RANDOM.VALUE(1,20)),
+      SYSDATE + TRUNC(DBMS_RANDOM.VALUE(30,180)),
+      'Generated maintenance #'||i
+    );
+  END LOOP;
+  COMMIT;
+  DBMS_OUTPUT.PUT_LINE('Maintenance records inserted: 300');
+END;
+/
+```
+
+---
+
+## 7. Maintenance Parts (800 rows)
+
+```sql
+DECLARE
+  v_m NUMBER;
+  v_p NUMBER;
+BEGIN
+  FOR i IN 1..800 LOOP
+    BEGIN
+      SELECT maintenance_id INTO v_m FROM (SELECT maintenance_id FROM MAINTENANCE_RECORDS ORDER BY DBMS_RANDOM.VALUE) WHERE ROWNUM=1;
+      SELECT part_id        INTO v_p FROM (SELECT part_id FROM PARTS ORDER BY DBMS_RANDOM.VALUE) WHERE ROWNUM=1;
+
+      INSERT INTO MAINTENANCE_PARTS (maintenance_id, part_id, quantity)
+      SELECT v_m, v_p, TRUNC(DBMS_RANDOM.VALUE(1,5)) FROM dual
+      WHERE NOT EXISTS (
+        SELECT 1 FROM MAINTENANCE_PARTS WHERE maintenance_id = v_m AND part_id = v_p
+      );
+    EXCEPTION WHEN OTHERS THEN NULL;
+    END;
+  END LOOP;
+  COMMIT;
+  DBMS_OUTPUT.PUT_LINE('Maintenance parts insertion attempted (duplicates skipped).');
+END;
+/
+```
+
+---
+
+## 8. Incidents (200 rows)
+
+```sql
+DECLARE
+  v_trip NUMBER;
+  v_count NUMBER;
+BEGIN
+  FOR i IN 1..200 LOOP
+    BEGIN
+      SELECT trip_id INTO v_trip FROM (SELECT trip_id FROM TRIPS ORDER BY DBMS_RANDOM.VALUE) WHERE ROWNUM=1;
+    EXCEPTION WHEN NO_DATA_FOUND THEN CONTINUE;
+    END;
+
+    INSERT INTO INCIDENTS (trip_id, incident_time, incident_type, severity, description)
+    VALUES (
+      v_trip,
+      SYSTIMESTAMP - TRUNC(DBMS_RANDOM.VALUE(0,365)),
+      CASE MOD(i,5)
+        WHEN 0 THEN 'BREAKDOWN'
+        WHEN 1 THEN 'ACCIDENT'
+        WHEN 2 THEN 'OVERSPEED'
+        WHEN 3 THEN 'ROUTE_DEVIATION'
+        ELSE 'OTHER'
+      END,
+      CASE WHEN MOD(i,10)=0 THEN 'CRITICAL'
+           WHEN MOD(i,3)=0 THEN 'MAJOR'
+           ELSE 'MINOR'
+      END,
+      'Incident #'||i
+    );
+  END LOOP;
+  COMMIT;
+  SELECT COUNT(*) INTO v_count FROM INCIDENTS;
+  DBMS_OUTPUT.PUT_LINE('Incidents inserted (total rows now): ' || TO_CHAR(v_count));
+END;
+/
+```
+
+---
+
+## 9. Users (20)
+
+```sql
+BEGIN
+  FOR i IN 1..20 LOOP
+    INSERT INTO USERS (username, full_name, role, email)
+    VALUES (
+      'user'||i,
+      'User '||i,
+      CASE WHEN i=1 THEN 'ADMIN'
+           WHEN i<=4 THEN 'FLEET_MANAGER'
+           WHEN i<=8 THEN 'DISPATCHER'
+           WHEN i<=14 THEN 'TECHNICIAN'
+           ELSE 'PARTS_CLERK'
+      END,
+      'user'||i||'@example.com'
+    );
+  END LOOP;
+  COMMIT;
+  DBMS_OUTPUT.PUT_LINE('Users inserted: 20');
+END;
+/
+```
+
+---
+
+## 10. Alerts (100)
+
+```sql
+DECLARE
+  v_type VARCHAR2(20);
+  v_id   NUMBER;
+BEGIN
+  FOR i IN 1..100 LOOP
+    v_type := CASE MOD(i,4)
+                WHEN 0 THEN 'VEHICLE'
+                WHEN 1 THEN 'DRIVER'
+                WHEN 2 THEN 'ROUTE'
+                ELSE 'TRIP'
+              END;
+
+    BEGIN
+      IF v_type='VEHICLE' THEN
+        SELECT vehicle_id INTO v_id FROM (SELECT vehicle_id FROM VEHICLES ORDER BY DBMS_RANDOM.VALUE) WHERE ROWNUM=1;
+      ELSIF v_type='DRIVER' THEN
+        SELECT driver_id INTO v_id FROM (SELECT driver_id FROM DRIVERS ORDER BY DBMS_RANDOM.VALUE) WHERE ROWNUM=1;
+      ELSIF v_type='ROUTE' THEN
+        SELECT route_id INTO v_id FROM (SELECT route_id FROM ROUTES ORDER BY DBMS_RANDOM.VALUE) WHERE ROWNUM=1;
+      ELSE
+        SELECT trip_id INTO v_id FROM (SELECT trip_id FROM TRIPS ORDER BY DBMS_RANDOM.VALUE) WHERE ROWNUM=1;
+      END IF;
+    EXCEPTION WHEN NO_DATA_FOUND THEN CONTINUE;
+    END;
+
+    INSERT INTO ALERTS (entity_type, entity_id, alert_type, severity, risk_score, message, status)
+    VALUES (
+      v_type, v_id, 'Auto Alert',
+      CASE WHEN MOD(i,5)=0 THEN 'HIGH'
+           WHEN MOD(i,3)=0 THEN 'MEDIUM'
+           ELSE 'LOW'
+      END,
+      ROUND(DBMS_RANDOM.VALUE(0,100),2),
+      'Generated alert #'||i,
+      'OPEN'
+    );
+  END LOOP;
+  COMMIT;
+  DBMS_OUTPUT.PUT_LINE('Alerts inserted (attempted up to 100).');
+END;
+/
+```
+
+---
+
+## 11. Risk Scores (150)
+
+```sql
+DECLARE
+  vtype VARCHAR2(20);
+  vid   NUMBER;
+BEGIN
+  FOR i IN 1..150 LOOP
+    vtype := CASE WHEN MOD(i,2)=0 THEN 'VEHICLE' ELSE 'TRIP' END;
+
+    BEGIN
+      IF vtype='VEHICLE' THEN
+        SELECT vehicle_id INTO vid FROM (SELECT vehicle_id FROM VEHICLES ORDER BY DBMS_RANDOM.VALUE) WHERE ROWNUM=1;
+      ELSE
+        SELECT trip_id INTO vid FROM (SELECT trip_id FROM TRIPS ORDER BY DBMS_RANDOM.VALUE) WHERE ROWNUM=1;
+      END IF;
+    EXCEPTION WHEN NO_DATA_FOUND THEN CONTINUE;
+    END;
+
+    INSERT INTO RISK_SCORES (entity_type, entity_id, risk_score, last_calculated)
+    SELECT vtype, vid, ROUND(DBMS_RANDOM.VALUE(0,100),2), SYSDATE FROM dual
+    WHERE NOT EXISTS (
+      SELECT 1 FROM RISK_SCORES WHERE entity_type=vtype AND entity_id=vid
+    );
+  END LOOP;
+  COMMIT;
+  DBMS_OUTPUT.PUT_LINE('Risk scores insertion attempted (duplicates skipped).');
+END;
+/
+```
+
+---
+
+## 12. Audit Log (200)
+
+```sql
+DECLARE
+  uid NUMBER;
+BEGIN
+  FOR i IN 1..200 LOOP
+    BEGIN
+      SELECT user_id INTO uid FROM (SELECT user_id FROM USERS ORDER BY DBMS_RANDOM.VALUE) WHERE ROWNUM=1;
+    EXCEPTION WHEN NO_DATA_FOUND THEN CONTINUE;
+    END;
+
+    INSERT INTO AUDIT_LOG (user_id, action_time, action_type, details)
+    VALUES (
+      uid,
+      SYSDATE - TRUNC(DBMS_RANDOM.VALUE(0,365)),
+      CASE WHEN MOD(i,5)=0 THEN 'DELETE'
+           WHEN MOD(i,4)=0 THEN 'UPDATE'
+           ELSE 'INSERT'
+      END,
+      'Log #'||i
+    );
+  END LOOP;
+  COMMIT;
+  DBMS_OUTPUT.PUT_LINE('Audit log entries inserted (attempted up to 200).');
+END;
+/
+```
+
+---
+
+## Verification
+After running all scripts, run the verification script (`verify_data_integrity.sql`) or the quick SQL checks in `verify_data_integrity.sql` to confirm FK integrity, counts, and constraints.
+
+---
+
+## Adjustments & Troubleshooting
+- If you experience duplicate PK errors on composite keys (MAINTENANCE_PARTS / RISK_SCORES), rerun the safe insertion blocks (they use `NOT EXISTS` checks).
+- If parent tables are empty, some inserts will be skipped; ensure Vehicles/Drivers/Routes/Parts are populated first.
+- Reduce loop counts if the database session times out.
+
+---
+
+## Exporting Results
+In SQL Developer use **F5** to run each block and copy the Script Output / DBMS_OUTPUT. Save outputs and include them in your GitHub `/database/docs/evidence/`.
+
+---
+
+If you want, I can now write this file to the workspace and provide a download link. Would you like me to save `populate_data.md` to the workspace?
