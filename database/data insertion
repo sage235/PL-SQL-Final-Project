@@ -1,16 +1,3 @@
-# populate_data.md
-## Population Script Documentation — Fleet & Maintenance System
-
-This document describes the data population scripts used for **Phase V**.  
-Run the scripts in the order shown **as the schema owner** (`mon_27232_lesage`) inside SQL Developer or SQL*Plus. Use **F5 (Run Script)** in SQL Developer so you see `DBMS_OUTPUT` messages.
-
-> **Important**
-> - All primary keys are auto-generated with `GENERATED ALWAYS AS IDENTITY`. **Do not** insert values into ID columns.
-> - If your environment has resource limits, reduce loop counts (suggested: Trips → 300, Drivers → 150, Vehicles → 100).
-> - Run the `create_schema.sql` first to create tables and constraints.
-
----
-
 ## Run order
 1. Vehicles
 2. Drivers
