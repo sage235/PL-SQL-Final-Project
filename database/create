@@ -1,7 +1,3 @@
------------------------------------------------------------
---  PHASE V - CREATE SCHEMA FOR FLEET & MAINTENANCE SYSTEM
---  Oracle 21c – All PKs use IDENTITY columns
------------------------------------------------------------
 
 -- VEHICLES
 CREATE TABLE VEHICLES (
