@@ -1,0 +1,82 @@
+-- Robust bulk-update procedure: compute new prices in PL/SQL then FORALL update
+CREATE OR REPLACE PROCEDURE proc_bulk_update_part_prices(
+  p_pct_increase IN NUMBER,
+  p_batch_size   IN PLS_INTEGER DEFAULT 1000
+) IS
+  -- record & collection types for bulk fetch
+  TYPE t_part_rec IS RECORD (
+    part_id   PARTS.PART_ID%TYPE,
+    unit_price PARTS.UNIT_PRICE%TYPE
+  );
+  TYPE t_part_tab IS TABLE OF t_part_rec;
+
+  -- collection to hold fetched rows
+  l_parts t_part_tab;
+
+  -- parallel collection for computed new prices
+  TYPE t_num_tab IS TABLE OF NUMBER;
+  l_new_prices t_num_tab;
+
+  CURSOR c_parts IS SELECT part_id, unit_price FROM PARTS; -- can add WHERE clause if needed
+
+  l_total NUMBER := 0;
+  v_err_code NUMBER;
+  v_err_msg  VARCHAR2(4000);
+BEGIN
+  IF p_pct_increase IS NULL THEN
+    RAISE_APPLICATION_ERROR(-22001,'p_pct_increase required');
+  END IF;
+
+  OPEN c_parts;
+  LOOP
+    FETCH c_parts BULK COLLECT INTO l_parts LIMIT p_batch_size;
+    EXIT WHEN l_parts.COUNT = 0;
+
+    -- prepare the new price collection
+    l_new_prices := t_num_tab(); -- reset
+    l_new_prices.EXTEND(l_parts.COUNT);
+
+    FOR i IN 1 .. l_parts.COUNT LOOP
+      -- compute new price in PL/SQL (avoid inline expressions inside DML)
+      l_new_prices(i) := ROUND(NVL(l_parts(i).unit_price,0) * (1 + NVL(p_pct_increase,0)/100), 2);
+    END LOOP;
+
+    -- apply updates in bulk using FORALL
+    FORALL i IN 1 .. l_parts.COUNT
+      UPDATE PARTS
+      SET unit_price = l_new_prices(i)
+      WHERE part_id = l_parts(i).part_id;
+
+    l_total := l_total + l_parts.COUNT;
+
+    -- commit per batch (adjust to your policy)
+    COMMIT;
+  END LOOP;
+
+  CLOSE c_parts;
+
+  DBMS_OUTPUT.PUT_LINE('Updated parts: ' || l_total);
+
+EXCEPTION
+  WHEN OTHERS THEN
+    v_err_code := SQLCODE;
+    v_err_msg  := SQLERRM;
+    BEGIN
+      -- ensure cursor closed
+      IF c_parts%ISOPEN THEN
+        CLOSE c_parts;
+      END IF;
+    EXCEPTION WHEN OTHERS THEN NULL;
+    END;
+
+    -- log the error (requires ERROR_LOG to exist)
+    BEGIN
+      INSERT INTO ERROR_LOG(object_name, action, err_code, err_msg, details)
+      VALUES('proc_bulk_update_part_prices','bulk_update', v_err_code, v_err_msg, 'pct='||NVL(TO_CHAR(p_pct_increase),'NULL') || ' processed='||l_total);
+      COMMIT;
+    EXCEPTION WHEN OTHERS THEN NULL;
+    END;
+
+    RAISE;
+END proc_bulk_update_part_prices;
+/
