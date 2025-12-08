@@ -1,0 +1,141 @@
+-----------------------------------------------------------
+--  PHASE V - CREATE SCHEMA FOR FLEET & MAINTENANCE SYSTEM
+--  Oracle 21c – All PKs use IDENTITY columns
+-----------------------------------------------------------
+
+-- VEHICLES
+CREATE TABLE VEHICLES (
+  vehicle_id     NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  plate_number   VARCHAR2(20) NOT NULL UNIQUE,
+  brand          VARCHAR2(50),
+  model          VARCHAR2(50),
+  capacity_tons  NUMBER(6,2) CHECK (capacity_tons >= 0),
+  status         VARCHAR2(20) DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','MAINTENANCE','OUT_OF_SERVICE'))
+);
+
+-- DRIVERS
+CREATE TABLE DRIVERS (
+  driver_id      NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  full_name      VARCHAR2(100) NOT NULL,
+  license_number VARCHAR2(50) UNIQUE,
+  experience_yrs NUMBER(3) DEFAULT 0 CHECK (experience_yrs >= 0),
+  status         VARCHAR2(20) DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','SUSPENDED'))
+);
+
+-- ROUTES
+CREATE TABLE ROUTES (
+  route_id         NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  origin_city      VARCHAR2(100) NOT NULL,
+  destination_city VARCHAR2(100) NOT NULL,
+  distance_km      NUMBER(8,2) CHECK (distance_km >= 0),
+  base_risk        VARCHAR2(10) DEFAULT 'LOW' CHECK (base_risk IN ('LOW','MEDIUM','HIGH'))
+);
+
+-- PARTS
+CREATE TABLE PARTS (
+  part_id    NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  part_name  VARCHAR2(150) NOT NULL,
+  unit_price NUMBER(12,2) DEFAULT 0 CHECK (unit_price >= 0),
+  stock_qty  NUMBER DEFAULT 0 CHECK (stock_qty >= 0)
+);
+
+-- MAINTENANCE RECORDS
+CREATE TABLE MAINTENANCE_RECORDS (
+  maintenance_id   NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  vehicle_id       NUMBER NOT NULL,
+  maintenance_date DATE DEFAULT SYSDATE NOT NULL,
+  maintenance_type VARCHAR2(20) CHECK (maintenance_type IN ('SCHEDULED','CORRECTIVE','EMERGENCY')),
+  cost_amount      NUMBER(12,2) DEFAULT 0 CHECK (cost_amount >= 0),
+  technician_id    NUMBER,
+  next_due_date    DATE,
+  notes            VARCHAR2(4000),
+  CONSTRAINT fk_maint_vehicle FOREIGN KEY (vehicle_id)
+    REFERENCES VEHICLES(vehicle_id)
+);
+
+-- MAINTENANCE_PARTS
+CREATE TABLE MAINTENANCE_PARTS (
+  maintenance_id NUMBER NOT NULL,
+  part_id        NUMBER NOT NULL,
+  quantity       NUMBER DEFAULT 1 CHECK (quantity > 0),
+  CONSTRAINT pk_maint_parts PRIMARY KEY (maintenance_id, part_id),
+  CONSTRAINT fk_mp_maint FOREIGN KEY (maintenance_id) REFERENCES MAINTENANCE_RECORDS(maintenance_id) ON DELETE CASCADE,
+  CONSTRAINT fk_mp_part  FOREIGN KEY (part_id)        REFERENCES PARTS(part_id)
+);
+
+-- TRIPS
+CREATE TABLE TRIPS (
+  trip_id         NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  vehicle_id      NUMBER NOT NULL,
+  driver_id       NUMBER NOT NULL,
+  route_id        NUMBER NOT NULL,
+  departure_time  TIMESTAMP,
+  arrival_time    TIMESTAMP,
+  planned_arrival TIMESTAMP,
+  trip_status     VARCHAR2(20) DEFAULT 'PLANNED' CHECK (trip_status IN ('PLANNED','IN_PROGRESS','COMPLETED','CANCELLED')),
+  delay_minutes   NUMBER DEFAULT 0 CHECK (delay_minutes >= 0),
+  CONSTRAINT fk_trip_vehicle FOREIGN KEY (vehicle_id) REFERENCES VEHICLES(vehicle_id),
+  CONSTRAINT fk_trip_driver  FOREIGN KEY (driver_id)  REFERENCES DRIVERS(driver_id),
+  CONSTRAINT fk_trip_route   FOREIGN KEY (route_id)   REFERENCES ROUTES(route_id)
+);
+
+-- INCIDENTS
+CREATE TABLE INCIDENTS (
+  incident_id    NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  trip_id        NUMBER NOT NULL,
+  incident_time  TIMESTAMP DEFAULT SYSTIMESTAMP,
+  incident_type  VARCHAR2(30) CHECK (incident_type IN ('BREAKDOWN','ACCIDENT','OVERSPEED','ROUTE_DEVIATION','OTHER')),
+  severity       VARCHAR2(20) CHECK (severity IN ('MINOR','MAJOR','CRITICAL')),
+  description    VARCHAR2(4000),
+  CONSTRAINT fk_inc_trip FOREIGN KEY (trip_id) REFERENCES TRIPS(trip_id)
+);
+
+-- USERS
+CREATE TABLE USERS (
+  user_id   NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  username  VARCHAR2(50) NOT NULL UNIQUE,
+  full_name VARCHAR2(150) NOT NULL,
+  role      VARCHAR2(30) CHECK (role IN ('ADMIN','FLEET_MANAGER','DISPATCHER','TECHNICICAN','PARTS_CLERK')),
+  email     VARCHAR2(100)
+);
+
+-- ALERTS
+CREATE TABLE ALERTS (
+  alert_id    NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  entity_type VARCHAR2(20) CHECK (entity_type IN ('VEHICLE','DRIVER','ROUTE','TRIP')),
+  entity_id   NUMBER,
+  alert_time  TIMESTAMP DEFAULT SYSTIMESTAMP,
+  alert_type  VARCHAR2(50),
+  severity    VARCHAR2(20),
+  risk_score  NUMBER(5,2),
+  message     VARCHAR2(2000),
+  status      VARCHAR2(20) DEFAULT 'OPEN' CHECK (status IN ('OPEN','IN_PROGRESS','RESOLVED'))
+);
+
+-- RISK SCORES
+CREATE TABLE RISK_SCORES (
+  entity_type     VARCHAR2(20),
+  entity_id       NUMBER,
+  risk_score      NUMBER(5,2),
+  last_calculated TIMESTAMP,
+  CONSTRAINT pk_risk PRIMARY KEY (entity_type, entity_id)
+);
+
+-- AUDIT LOG
+CREATE TABLE AUDIT_LOG (
+  log_id      NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  user_id     NUMBER,
+  action_time TIMESTAMP DEFAULT SYSTIMESTAMP,
+  action_type VARCHAR2(50),
+  details     VARCHAR2(4000),
+  CONSTRAINT fk_audit_user FOREIGN KEY (user_id) REFERENCES USERS(user_id)
+);
+
+-- Indexes
+CREATE INDEX idx_trip_vehicle ON TRIPS(vehicle_id);
+CREATE INDEX idx_trip_driver  ON TRIPS(driver_id);
+CREATE INDEX idx_trip_route   ON TRIPS(route_id);
+CREATE INDEX idx_maint_v      ON MAINTENANCE_RECORDS(vehicle_id);
+CREATE INDEX idx_inc_trip     ON INCIDENTS(trip_id);
+
+COMMIT;
