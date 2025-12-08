@@ -1,1 +1,36 @@
 
+-- proc_delete_old_trips: remove old trips and return deleted count
+CREATE OR REPLACE PROCEDURE proc_delete_old_trips(
+  p_before_date   IN  DATE,
+  p_deleted_count OUT NUMBER
+) IS
+  v_err_code NUMBER;
+  v_err_msg  VARCHAR2(4000);
+BEGIN
+  IF p_before_date IS NULL THEN
+    RAISE_APPLICATION_ERROR(-20031, 'p_before_date is required');
+  END IF;
+
+  DELETE FROM TRIPS
+  WHERE departure_time < p_before_date;
+
+  p_deleted_count := SQL%ROWCOUNT;
+
+  COMMIT;
+
+EXCEPTION
+  WHEN OTHERS THEN
+    v_err_code := SQLCODE;
+    v_err_msg  := SQLERRM;
+    -- Log error for debugging / grading evidence
+    BEGIN
+      INSERT INTO ERROR_LOG(object_name, action, err_code, err_msg, details)
+      VALUES ('proc_delete_old_trips', 'delete', v_err_code, v_err_msg, 'before=' || TO_CHAR(p_before_date,'YYYY-MM-DD HH24:MI:SS'));
+      COMMIT;
+    EXCEPTION WHEN OTHERS THEN
+      NULL; -- never fail the exception handler
+    END;
+    ROLLBACK;
+    RAISE;
+END proc_delete_old_trips;
+/
