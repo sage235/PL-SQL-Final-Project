@@ -1,1 +1,49 @@
 
+-- proc_update_trip_status: update a trip's status; return previous status via IN OUT
+CREATE OR REPLACE PROCEDURE proc_update_trip_status(
+  p_trip_id     IN   NUMBER,
+  p_new_status  IN   VARCHAR2,
+  p_prev_status IN OUT VARCHAR2
+) IS
+  v_old_status VARCHAR2(20);
+  v_err_code NUMBER;
+  v_err_msg  VARCHAR2(4000);
+BEGIN
+  IF p_trip_id IS NULL THEN
+    RAISE_APPLICATION_ERROR(-20021,'trip_id is required');
+  END IF;
+
+  BEGIN
+    SELECT trip_status INTO v_old_status FROM TRIPS WHERE trip_id = p_trip_id FOR UPDATE;
+  EXCEPTION
+    WHEN NO_DATA_FOUND THEN
+      INSERT INTO ERROR_LOG(object_name, action, err_code, err_msg, details)
+      VALUES ('proc_update_trip_status','select','NO_DATA_FOUND','Trip not found','trip_id='||p_trip_id);
+      COMMIT;
+      RAISE_APPLICATION_ERROR(-20022,'Trip not found: '||p_trip_id);
+  END;
+
+  IF p_new_status NOT IN ('PLANNED','IN_PROGRESS','COMPLETED','CANCELLED') THEN
+    v_err_code := -20023;
+    v_err_msg := 'Invalid trip status: ' || NVL(p_new_status,'<NULL>');
+    INSERT INTO ERROR_LOG(object_name, action, err_code, err_msg, details)
+    VALUES ('proc_update_trip_status','validate',v_err_code, v_err_msg ,'status='||NVL(p_new_status,'NULL'));
+    COMMIT;
+    RAISE_APPLICATION_ERROR(-20023,v_err_msg);
+  END IF;
+
+  UPDATE TRIPS SET trip_status = p_new_status WHERE trip_id = p_trip_id;
+  p_prev_status := v_old_status;
+
+  COMMIT;
+EXCEPTION
+  WHEN OTHERS THEN
+    v_err_code := SQLCODE;
+    v_err_msg  := SQLERRM;
+    INSERT INTO ERROR_LOG(object_name, action, err_code, err_msg, details)
+    VALUES ('proc_update_trip_status','update',v_err_code, v_err_msg, 'trip_id='||NVL(TO_CHAR(p_trip_id),'NULL'));
+    COMMIT;
+    ROLLBACK;
+    RAISE;
+END proc_update_trip_status;
+/
