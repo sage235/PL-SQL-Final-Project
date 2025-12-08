@@ -1,0 +1,419 @@
+Public members (package spec)
+
+add_user(...) — insert user, returns new id (OUT)
+
+adjust_part_stock(...) — IN/IN/IN OUT adjust stock
+
+update_trip_status(...) — IN/IN/IN OUT update trip status
+
+delete_old_trips(...) — delete trips before a date, returns deleted count (OUT)
+
+process_overdue_maintenance — explicit-cursor worker
+
+bulk_insert_vehicles_from_temp(...) — bulk loader from staging table
+
+bulk_update_part_prices(...) — bulk price updater
+
+
+--------------------------------------------------------------------------------
+-- Package: fleet_ops_pkg
+-- Groups core procedures for the Transport & Fleet project:
+--  - user management
+--  - parts stock adjustments
+--  - trip status updates
+--  - old-trip cleanup (delete)
+--  - processing overdue maintenance (explicit cursor)
+--  - bulk insert / bulk update helpers
+--
+-- Notes:
+--  - package body includes autonomous helpers for durable logging/alerts
+--  - implementations avoid known parser pitfalls (use binds, local vars)
+--------------------------------------------------------------------------------
+
+SET SERVEROUTPUT ON SIZE 1000000;
+
+-- =========================
+-- Package specification
+-- =========================
+CREATE OR REPLACE PACKAGE fleet_ops_pkg IS
+
+  -- 1. Add a user: IN params and OUT new id
+  PROCEDURE add_user(
+    p_username     IN  VARCHAR2,
+    p_full_name    IN  VARCHAR2,
+    p_user_role    IN  VARCHAR2,
+    p_email        IN  VARCHAR2,
+    p_new_user_id  OUT NUMBER
+  );
+
+  -- 2. Adjust part stock: IN part_id, IN qty_change, IN OUT current stock
+  PROCEDURE adjust_part_stock(
+    p_part_id       IN     NUMBER,
+    p_qty_change    IN     NUMBER,
+    p_current_stock IN OUT NUMBER
+  );
+
+  -- 3. Update trip status: IN trip_id, IN new_status, IN OUT prev_status
+  PROCEDURE update_trip_status(
+    p_trip_id     IN   NUMBER,
+    p_new_status  IN   VARCHAR2,
+    p_prev_status IN OUT VARCHAR2
+  );
+
+  -- 4. Delete old trips (returns deleted count)
+  PROCEDURE delete_old_trips(
+    p_before_date   IN  DATE,
+    p_deleted_count OUT NUMBER
+  );
+
+  -- 5. Process overdue maintenance (cursor-based worker)
+  PROCEDURE process_overdue_maintenance;
+
+  -- 6. Bulk insert vehicles from staging VEHICLES_TEMP
+  PROCEDURE bulk_insert_vehicles_from_temp(
+    p_batch_size IN PLS_INTEGER DEFAULT 1000
+  );
+
+  -- 7. Bulk update part prices (percentage increase)
+  PROCEDURE bulk_update_part_prices(
+    p_pct_increase IN NUMBER,
+    p_batch_size   IN PLS_INTEGER DEFAULT 1000
+  );
+
+END fleet_ops_pkg;
+/
+-- =========================
+-- Package body (implementation)
+-- =========================
+CREATE OR REPLACE PACKAGE BODY fleet_ops_pkg IS
+
+  -- Private: autonomous logging helper
+  PROCEDURE log_error_autonomous(
+    p_object_name IN VARCHAR2,
+    p_action      IN VARCHAR2,
+    p_err_code    IN NUMBER,
+    p_err_msg     IN VARCHAR2,
+    p_details     IN VARCHAR2
+  ) IS
+    PRAGMA AUTONOMOUS_TRANSACTION;
+  BEGIN
+    INSERT INTO ERROR_LOG(object_name, action, err_code, err_msg, details)
+    VALUES (p_object_name, p_action, p_err_code, p_err_msg, p_details);
+    COMMIT;
+  EXCEPTION WHEN OTHERS THEN NULL;
+  END log_error_autonomous;
+
+  -- Private: autonomous alert inserter
+  PROCEDURE insert_alert_autonomous(
+    p_alert_type IN VARCHAR2,
+    p_entity_id  IN NUMBER,
+    p_message    IN VARCHAR2
+  ) IS
+    PRAGMA AUTONOMOUS_TRANSACTION;
+  BEGIN
+    INSERT INTO ALERTS(alert_type, entity_id, message, created_at)
+    VALUES (p_alert_type, p_entity_id, p_message, SYSTIMESTAMP);
+    COMMIT;
+  EXCEPTION WHEN OTHERS THEN NULL;
+  END insert_alert_autonomous;
+
+  ------------------------------------------------------------------------------
+  -- 1. add_user implementation
+  ------------------------------------------------------------------------------
+  PROCEDURE add_user(
+    p_username     IN  VARCHAR2,
+    p_full_name    IN  VARCHAR2,
+    p_user_role    IN  VARCHAR2,
+    p_email        IN  VARCHAR2,
+    p_new_user_id  OUT NUMBER
+  ) IS
+    v_username VARCHAR2(50);
+    v_err_code NUMBER;
+    v_err_msg  VARCHAR2(4000);
+  BEGIN
+    IF p_username IS NULL OR TRIM(p_username) = '' THEN
+      RAISE_APPLICATION_ERROR(-20001,'Username is required');
+    END IF;
+
+    v_username := UPPER(TRIM(p_username));
+
+    BEGIN
+      EXECUTE IMMEDIATE
+        'INSERT INTO USERS (username, full_name, role, email, created_at) VALUES (:1,:2,:3,:4,SYSTIMESTAMP)'
+      USING v_username, p_full_name, p_user_role, p_email;
+
+      -- fetch id using unique username
+      SELECT user_id INTO p_new_user_id FROM USERS WHERE username = v_username;
+
+      COMMIT;
+    EXCEPTION
+      WHEN DUP_VAL_ON_INDEX THEN
+        v_err_code := SQLCODE;
+        v_err_msg  := SQLERRM;
+        log_error_autonomous('fleet_ops_pkg.add_user','insert',v_err_code, v_err_msg, 'username='||v_username);
+        RAISE_APPLICATION_ERROR(-20002,'Username already exists: '||v_username);
+      WHEN OTHERS THEN
+        v_err_code := SQLCODE;
+        v_err_msg  := SQLERRM;
+        log_error_autonomous('fleet_ops_pkg.add_user','insert',v_err_code, v_err_msg, 'username='||NVL(v_username,'NULL'));
+        RAISE;
+    END;
+  END add_user;
+
+  ------------------------------------------------------------------------------
+  -- 2. adjust_part_stock implementation
+  ------------------------------------------------------------------------------
+  PROCEDURE adjust_part_stock(
+    p_part_id       IN     NUMBER,
+    p_qty_change    IN     NUMBER,
+    p_current_stock IN OUT NUMBER
+  ) IS
+    v_stock NUMBER;
+    v_err_code NUMBER;
+    v_err_msg  VARCHAR2(4000);
+  BEGIN
+    IF p_part_id IS NULL THEN
+      RAISE_APPLICATION_ERROR(-20011,'part_id is required');
+    END IF;
+
+    BEGIN
+      SELECT stock_qty INTO v_stock FROM PARTS WHERE part_id = p_part_id FOR UPDATE;
+    EXCEPTION WHEN NO_DATA_FOUND THEN
+      log_error_autonomous('fleet_ops_pkg.adjust_part_stock','select',SQLCODE,SQLERRM,'part_id='||p_part_id);
+      RAISE_APPLICATION_ERROR(-20012,'Part not found: '||p_part_id);
+    END;
+
+    v_stock := v_stock + NVL(p_qty_change,0);
+
+    IF v_stock < 0 THEN
+      log_error_autonomous('fleet_ops_pkg.adjust_part_stock','validate',NULL,'STOCK_UNDERFLOW','part_id='||p_part_id||' change='||p_qty_change);
+      RAISE_APPLICATION_ERROR(-20013,'Insufficient stock for part '||p_part_id||' (change='||p_qty_change||')');
+    END IF;
+
+    UPDATE PARTS SET stock_qty = v_stock WHERE part_id = p_part_id;
+    p_current_stock := v_stock;
+    COMMIT;
+  EXCEPTION WHEN OTHERS THEN
+    v_err_code := SQLCODE;
+    v_err_msg  := SQLERRM;
+    log_error_autonomous('fleet_ops_pkg.adjust_part_stock','update',v_err_code, v_err_msg, 'part_id='||NVL(TO_CHAR(p_part_id),'NULL'));
+    ROLLBACK;
+    RAISE;
+  END adjust_part_stock;
+
+  ------------------------------------------------------------------------------
+  -- 3. update_trip_status implementation
+  ------------------------------------------------------------------------------
+  PROCEDURE update_trip_status(
+    p_trip_id     IN   NUMBER,
+    p_new_status  IN   VARCHAR2,
+    p_prev_status IN OUT VARCHAR2
+  ) IS
+    v_old_status VARCHAR2(20);
+    v_err_code NUMBER;
+    v_err_msg  VARCHAR2(4000);
+  BEGIN
+    IF p_trip_id IS NULL THEN
+      RAISE_APPLICATION_ERROR(-20021,'trip_id is required');
+    END IF;
+
+    BEGIN
+      SELECT trip_status INTO v_old_status FROM TRIPS WHERE trip_id = p_trip_id FOR UPDATE;
+    EXCEPTION WHEN NO_DATA_FOUND THEN
+      log_error_autonomous('fleet_ops_pkg.update_trip_status','select',SQLCODE,SQLERRM,'trip_id='||p_trip_id);
+      RAISE_APPLICATION_ERROR(-20022,'Trip not found: '||p_trip_id);
+    END;
+
+    IF p_new_status NOT IN ('PLANNED','IN_PROGRESS','COMPLETED','CANCELLED') THEN
+      log_error_autonomous('fleet_ops_pkg.update_trip_status','validate',-20023,'Invalid trip status: '||NVL(p_new_status,'<NULL>'),'status='||NVL(p_new_status,'NULL'));
+      RAISE_APPLICATION_ERROR(-20023,'Invalid trip status: '||NVL(p_new_status,'<NULL>'));
+    END IF;
+
+    UPDATE TRIPS SET trip_status = p_new_status WHERE trip_id = p_trip_id;
+    p_prev_status := v_old_status;
+    COMMIT;
+  EXCEPTION WHEN OTHERS THEN
+    v_err_code := SQLCODE;
+    v_err_msg  := SQLERRM;
+    log_error_autonomous('fleet_ops_pkg.update_trip_status','update',v_err_code, v_err_msg, 'trip_id='||NVL(TO_CHAR(p_trip_id),'NULL'));
+    ROLLBACK;
+    RAISE;
+  END update_trip_status;
+
+  ------------------------------------------------------------------------------
+  -- 4. delete_old_trips implementation
+  ------------------------------------------------------------------------------
+  PROCEDURE delete_old_trips(
+    p_before_date   IN  DATE,
+    p_deleted_count OUT NUMBER
+  ) IS
+    v_err_code NUMBER;
+    v_err_msg  VARCHAR2(4000);
+  BEGIN
+    IF p_before_date IS NULL THEN
+      RAISE_APPLICATION_ERROR(-20031,'p_before_date is required');
+    END IF;
+
+    DELETE FROM TRIPS WHERE departure_time < CAST(p_before_date AS TIMESTAMP);
+
+    p_deleted_count := SQL%ROWCOUNT;
+    COMMIT;
+  EXCEPTION WHEN OTHERS THEN
+    v_err_code := SQLCODE;
+    v_err_msg  := SQLERRM;
+    log_error_autonomous('fleet_ops_pkg.delete_old_trips','delete',v_err_code, v_err_msg, 'before='||TO_CHAR(p_before_date,'YYYY-MM-DD HH24:MI:SS'));
+    ROLLBACK;
+    RAISE;
+  END delete_old_trips;
+
+  ------------------------------------------------------------------------------
+  -- 5. process_overdue_maintenance implementation (explicit cursor)
+  ------------------------------------------------------------------------------
+  PROCEDURE process_overdue_maintenance IS
+    CURSOR c_overdue IS
+      SELECT maintenance_id, vehicle_id, scheduled_date
+      FROM MAINTENANCE_RECORDS
+      WHERE status = 'PENDING' AND scheduled_date < SYSTIMESTAMP
+      FOR UPDATE SKIP LOCKED;
+
+    v_rec c_overdue%ROWTYPE;
+    v_processed NUMBER := 0;
+    v_message VARCHAR2(4000);
+    v_alert_type VARCHAR2(100) := 'MAINTENANCE_OVERDUE';
+  BEGIN
+    OPEN c_overdue;
+    LOOP
+      FETCH c_overdue INTO v_rec;
+      EXIT WHEN c_overdue%NOTFOUND;
+
+      BEGIN
+        v_message := 'Maintenance overdue for vehicle ' || NVL(TO_CHAR(v_rec.vehicle_id),'?');
+
+        UPDATE MAINTENANCE_RECORDS
+          SET status = 'OVERDUE', updated_at = SYSTIMESTAMP
+        WHERE maintenance_id = v_rec.maintenance_id;
+
+        -- commitless main work — use autonomous alert inserter to persist alert safely
+        insert_alert_autonomous(v_alert_type, v_rec.maintenance_id, v_message);
+
+        v_processed := v_processed + 1;
+
+      EXCEPTION WHEN OTHERS THEN
+        log_error_autonomous('fleet_ops_pkg.process_overdue_maintenance','process',SQLCODE,SQLERRM,'maintenance_id='||NVL(TO_CHAR(v_rec.maintenance_id),'NULL'));
+      END;
+    END LOOP;
+
+    CLOSE c_overdue;
+    COMMIT; -- commit all updates after loop
+    DBMS_OUTPUT.PUT_LINE('Overdue maintenance processed: ' || v_processed);
+
+  EXCEPTION WHEN OTHERS THEN
+    IF c_overdue%ISOPEN THEN
+      CLOSE c_overdue;
+    END IF;
+    log_error_autonomous('fleet_ops_pkg.process_overdue_maintenance','outer',SQLCODE,SQLERRM,NULL);
+    RAISE;
+  END process_overdue_maintenance;
+
+  ------------------------------------------------------------------------------
+  -- 6. bulk_insert_vehicles_from_temp (dynamic cursor + bulk collect)
+  ------------------------------------------------------------------------------
+  PROCEDURE bulk_insert_vehicles_from_temp(p_batch_size IN PLS_INTEGER DEFAULT 1000) IS
+    TYPE t_plate_tab IS TABLE OF VARCHAR2(50);
+    l_plates t_plate_tab;
+    rc SYS_REFCURSOR;
+    v_cnt NUMBER;
+    v_err_code NUMBER;
+    v_err_msg VARCHAR2(4000);
+    l_total NUMBER := 0;
+    l_sql VARCHAR2(1000);
+  BEGIN
+    -- verify staging
+    SELECT COUNT(*) INTO v_cnt FROM user_tables WHERE table_name = 'VEHICLES_TEMP';
+    IF v_cnt = 0 THEN
+      RAISE_APPLICATION_ERROR(-20050,'Staging table VEHICLES_TEMP does not exist.');
+    END IF;
+
+    l_sql := 'SELECT plate_number FROM VEHICLES_TEMP';
+    OPEN rc FOR l_sql;
+
+    LOOP
+      FETCH rc BULK COLLECT INTO l_plates LIMIT p_batch_size;
+      EXIT WHEN l_plates.COUNT = 0;
+
+      FORALL i IN 1 .. l_plates.COUNT
+        INSERT INTO VEHICLES(plate_number) VALUES (l_plates(i));
+
+      l_total := l_total + l_plates.COUNT;
+      COMMIT;
+    END LOOP;
+
+    CLOSE rc;
+    DBMS_OUTPUT.PUT_LINE('Inserted vehicles: ' || l_total);
+
+  EXCEPTION WHEN OTHERS THEN
+    v_err_code := SQLCODE;
+    v_err_msg  := SQLERRM;
+    BEGIN
+      IF rc%ISOPEN THEN CLOSE rc; END IF;
+    EXCEPTION WHEN OTHERS THEN NULL;
+    END;
+    log_error_autonomous('fleet_ops_pkg.bulk_insert_vehicles_from_temp','bulk_insert',v_err_code,v_err_msg,'processed='||l_total);
+    RAISE;
+  END bulk_insert_vehicles_from_temp;
+
+  ------------------------------------------------------------------------------
+  -- 7. bulk_update_part_prices implementation (bulk collect + forall)
+  ------------------------------------------------------------------------------
+  PROCEDURE bulk_update_part_prices(p_pct_increase IN NUMBER, p_batch_size IN PLS_INTEGER DEFAULT 1000) IS
+    TYPE t_part_rec IS RECORD (part_id PARTS.PART_ID%TYPE, unit_price PARTS.UNIT_PRICE%TYPE);
+    TYPE t_part_tab IS TABLE OF t_part_rec;
+    TYPE t_num_tab IS TABLE OF NUMBER;
+    l_parts t_part_tab;
+    l_new_prices t_num_tab;
+    CURSOR c_parts IS SELECT part_id, unit_price FROM PARTS;
+    l_total NUMBER := 0;
+    v_err_code NUMBER;
+    v_err_msg VARCHAR2(4000);
+  BEGIN
+    IF p_pct_increase IS NULL THEN
+      RAISE_APPLICATION_ERROR(-22001,'p_pct_increase required');
+    END IF;
+
+    OPEN c_parts;
+    LOOP
+      FETCH c_parts BULK COLLECT INTO l_parts LIMIT p_batch_size;
+      EXIT WHEN l_parts.COUNT = 0;
+
+      l_new_prices := t_num_tab();
+      l_new_prices.EXTEND(l_parts.COUNT);
+
+      FOR i IN 1 .. l_parts.COUNT LOOP
+        l_new_prices(i) := ROUND(NVL(l_parts(i).unit_price,0) * (1 + p_pct_increase/100), 2);
+      END LOOP;
+
+      FORALL i IN 1 .. l_parts.COUNT
+        UPDATE PARTS SET unit_price = l_new_prices(i) WHERE part_id = l_parts(i).part_id;
+
+      l_total := l_total + l_parts.COUNT;
+      COMMIT;
+    END LOOP;
+
+    CLOSE c_parts;
+    DBMS_OUTPUT.PUT_LINE('Updated parts: ' || l_total);
+
+  EXCEPTION WHEN OTHERS THEN
+    v_err_code := SQLCODE;
+    v_err_msg  := SQLERRM;
+    BEGIN
+      IF c_parts%ISOPEN THEN CLOSE c_parts; END IF;
+    EXCEPTION WHEN OTHERS THEN NULL;
+    END;
+    log_error_autonomous('fleet_ops_pkg.bulk_update_part_prices','bulk_update',v_err_code,v_err_msg,'pct='||NVL(TO_CHAR(p_pct_increase),'NULL')||' processed='||l_total);
+    RAISE;
+  END bulk_update_part_prices;
+
+END fleet_ops_pkg;
+/
+-- show any compile errors
+SHOW ERRORS PACKAGE BODY fleet_ops_pkg;
