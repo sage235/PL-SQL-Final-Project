@@ -1,0 +1,20 @@
+├── README.md (project overview)
+├── database/
+│ ├── scripts/ (all SQL: CREATE, INSERT, procedures, triggers)
+│ 
+├── queries/
+│ ├── data_retrieval.sql
+│ ├── analytics_queries.sql
+│ └── audit_queries.sql
+├── business_intelligence/
+│ ├── bi_requirements.md
+│ ├── dashboards.md
+│ └── kpi_definitions.md
+├── screenshots/
+│ ├── oem_monitoring/
+│ ├── database_objects/
+│ └── test_results/
+└── documentation/
+ ├── data_dictionary.md
+ ├── architecture.md
+ 
